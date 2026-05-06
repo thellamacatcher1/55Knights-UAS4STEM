@@ -31,11 +31,15 @@ class ObjectDetector:
             self.class_names = f.read().splitlines()
 
         self._detections = []
+        self._offset = (0, 0)
         self._hailo = None
         self._picam2 = None
 
     def get_detections(self):
         return list(self._detections)
+
+    def get_offset(self):
+        return self._offset
 
     def start(self):
         self._hailo = Hailo(self.model)
@@ -76,7 +80,9 @@ class ObjectDetector:
             pass
         finally:
             self.stop()
-
+            
     def _draw_callback(self, request):
         with MappedArray(request, "main") as m:
-            draw_detections(m.array, self._detections, self.video_w, self.video_h)
+            self._offset = draw_detections(
+                m.array, self._detections, self.video_w, self.video_h
+            )
