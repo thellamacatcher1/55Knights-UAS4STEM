@@ -1,6 +1,6 @@
 
 #DO STUFF HEREM WHOEVER IS RESPONNSISBLE FOR MAVLINK COMMECTIONS SHI
-
+from pymavlink import mavutil
 class Drone:
     def __init__(self, connection_string, baud=57600):
         self.connection_string = connection_string
@@ -9,6 +9,7 @@ class Drone:
 
     def connect(self):
         #connect drone shi
+        #reminder for reboot ardu ahn start
         raise NotImplementedError
 
     def disconnect(self):
