@@ -1,0 +1,1 @@
+from uas_vision.detector import ObjectDetector
