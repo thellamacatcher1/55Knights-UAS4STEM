@@ -29,7 +29,7 @@ def draw_detections(array, detections, video_w, video_h):
         x0, y0, x1, y1 = best[1]
         bx, by = (x0 + x1) // 2, (y0 + y1) // 2
 
-        offset_x, offset_y = bx - cx, by - cy
+        offset_x, offset_y = bx - cx, cy - by #btw, for cv2 0,0 start left top corner
 
         cv2.line(array, (cx, cy), (bx, by), (0, 0, 255, 0), 2)
         cv2.circle(array, (bx, by), 6, (0, 0, 255, 0), -1)
