@@ -1,9 +1,9 @@
-MODEL_PATH = ""
-LABELS_PATH = "models/coco.txt"
+MODEL_PATH = "models/qr8s.hef"
+LABELS_PATH = "models/QRLabels.txt"
 SCORE_THRESH = 0.5
 VIDEO_W = 1280
 VIDEO_H = 960
 FRAME_RATE = 30
 
 MAVLINK_CONNECTION = "/dev/ttyACM0"
-MAVLINK_BAUD = 67 #idk buad, fix later 
+MAVLINK_BAUD = 57600 #idk buad, fix later 
