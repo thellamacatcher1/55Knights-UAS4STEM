@@ -1,6 +1,6 @@
 class Controller:
-    def __init__(self, vehicle, detector):
-        self.vehicle = vehicle
+    def __init__(self, drone, detector):
+        self.drone = drone
         self.detector = detector
 
     def run_loop(self):
