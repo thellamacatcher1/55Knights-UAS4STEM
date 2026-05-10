@@ -3,6 +3,9 @@ from picamera2.devices import Hailo, hailo_architecture
 
 from uas_vision.utils import extract_detections, draw_detections
 import config
+import threading
+import cv2
+import numpy as np
 
 class ObjectDetector:
     def __init__(
@@ -26,6 +29,8 @@ class ObjectDetector:
         self.video_w = video_w
         self.video_h = video_h
         self.frame_rate = frame_rate
+        self._lock = threading.Lock()
+
 
         with open(labels, 'r', encoding='utf-8') as f:
             self.class_names = f.read().splitlines()
@@ -36,10 +41,12 @@ class ObjectDetector:
         self._picam2 = None
 
     def get_detections(self):
-        return list(self._detections)
+        with self._lock:
+            return list(self._detections)
 
     def get_offset(self):
-        return self._offset
+        with self._lock:
+            return self._offset
 
     def start(self):
         self._hailo = Hailo(self.model)
@@ -56,6 +63,8 @@ class ObjectDetector:
         self._picam2.start_preview(Preview.QTGL, x=0, y=0,
                                    width=self.video_w, height=self.video_h)
         self._picam2.start()
+        #cropping
+        #self._picam2.set_controls({"ScalerCrop": (184, 0, 1088, 1088)})  # ← add here
         self._picam2.pre_callback = self._draw_callback
 
     def stop(self):
@@ -72,10 +81,11 @@ class ObjectDetector:
             while True:
                 frame = self._picam2.capture_array('lores')
                 results = self._hailo.run(frame)
-                self._detections = extract_detections(
-                    results, self.video_w, self.video_h,
-                    self.class_names, self.score_thresh
-                )
+                with self._lock:
+                    self._detections = extract_detections(
+                        results, self.video_w, self.video_h,
+                        self.class_names, self.score_thresh
+                    )
         except KeyboardInterrupt:
             pass
         finally:
@@ -83,6 +93,7 @@ class ObjectDetector:
             
     def _draw_callback(self, request):
         with MappedArray(request, "main") as m:
-            self._offset = draw_detections(
-                m.array, self._detections, self.video_w, self.video_h
-            )
+            with self._lock:
+                self._offset = draw_detections(
+                    m.array, self._detections, self.video_w, self.video_h
+                )
