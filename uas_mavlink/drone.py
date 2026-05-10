@@ -1,9 +1,11 @@
 
 #DO STUFF HEREM WHOEVER IS RESPONNSISBLE FOR MAVLINK COMMECTIONS SHI
 from pymavlink import mavutil
+import time
+import math
 class Drone:
     def __init__(self, connection_string, baud=57600):
-        self.connection_string = connection_string
+        self._conn_string = connection_string
         self.baud = baud
         self._conn = None
 
@@ -12,7 +14,7 @@ class Drone:
         #reminder for reboot ardu ahn start
         print("[Drone] Connecting...")
         self._conn = mavutil.mavlink_connection(
-            self.connection_string,
+            self._conn_string,
             baud=self.baud
         )
         print("[Drone] Waiting for heartbeat...")
@@ -26,18 +28,6 @@ class Drone:
             self._conn = None
             print("[Drone] Disconnected")
 
-    def arm(self):
-        print("[Drone] Arming...")
-        self._conn.mav.command_long_send(
-            self._conn.target_system,
-            self._conn.target_component,
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-            0,          # confirmation
-            1,          # param1: 1=arm
-            0, 0, 0, 0, 0, 0  # params 2-7 unused
-        )
-        self._conn.motors_armed_wait()
-        print("[Drone] Armed")
 
     def disarm(self):
         print("[Drone] Disarming...")
@@ -80,23 +70,102 @@ class Drone:
             }
         return None
     
-    def send_body_velocity(self, vx, vy, vz):
-    
-    ##Velocity relative to drone's current heading.
-    ##vx = Forward (+) / Backward (-)
-    ##vy = Right (+) / Left (-)
-    ##vz = Down (+) / Up (-)
-    ##MUST be called repeatedly — stops after ~3s with no command.
-    
-        self.connection.mav.set_position_target_local_ned_send(
-            0,
-            self.connection.target_system,
-            self.connection.target_component,
-            mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-            3527,
-            0, 0, 0,       # position (ignored)
-            vx, vy, vz,    # velocity (used)
-            0, 0, 0,       # acceleration (ignored)
-            0, 0           # yaw, yaw_rate (ignored)
-        )
+ 
         
+    def set_pos(self, mode: str, x: float, y: float, z: float):
+    
+        """
+        mode: POS or VELO, all relative to drone heading
+        x: forward(+) / backward(-)
+        y: right(+) / left(-)
+        z: down(+) / up(-)
+        For yaw use condition_yaw() separately.
+        """
+    
+        if mode == "POS":
+            type_mask = (
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_VX_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_VY_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_VZ_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+            )
+            px, py, pz = x, y, z
+            vx, vy, vz = 0, 0, 0
+        elif mode == "VELO":
+            type_mask = (
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_Z_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_AX_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_AY_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE |
+                mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+            )
+            px, py, pz = 0, 0, 0
+            vx, vy, vz = x, y, z
+        else:
+            raise ValueError(f"[Drone] Unknown mode '{mode}'. Use 'POS' or 'VELO'")
+
+        self._conn.mav.set_position_target_local_ned_send(
+            0,
+            self._conn.target_system,
+            self._conn.target_component,
+            mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+            type_mask,
+            px, py, pz,
+            vx, vy, vz,
+            0, 0, 0,
+            0, 0
+        )
+    
+    def condition_yaw(self, degrees: float, speed: float = 10, direction: int = 1, relative: int = 1):
+    
+        # Rotate the drone's yaw.
+        # degrees:   angle in degrees
+        # speed:     rotation speed in deg/s (default 10)
+        # direction: 1=CW, -1=CCW, 0=shortest path (only works if relative=0)
+        # relative:  1=relative to current heading, 0=absolute heading
+    
+        self._conn.mav.command_long_send(
+            self._conn.target_system,
+            self._conn.target_component,
+            mavutil.mavlink.MAV_CMD_CONDITION_YAW,
+            0,           # confirmation
+            degrees,     # param1: angle in degrees
+            speed,       # param2: deg/s
+            direction,   # param3: 1=CW, -1=CCW, 0=shortest
+            relative,    # param4: 1=relative, 0=absolute
+            0, 0, 0      # params 5-7 unused
+        )
+    
+    def goto(self, lat: float, lon: float, alt: float, yaw_deg: float = None):
+        """
+        Fly to GPS coordinate using MAV_CMD_DO_REPOSITION.
+        lat, lon:  decimal degrees
+        alt:       meters relative to home
+        yaw_deg:   absolute yaw in degrees (0=North). None = keep current heading.
+        """
+        yaw_rad = math.radians(yaw_deg) if yaw_deg is not None else float('nan')
+
+        self._conn.mav.command_int_send(
+            self._conn.target_system,
+            self._conn.target_component,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+            0,                  # current (unused)
+            0,                  # autocontinue (unused)
+            -1,                 # param1: speed -1 = default
+            0,                  # param2: bitmask flags
+            0,                  # param3: loiter radius (planes only)
+            yaw_rad,            # param4: yaw in radians, nan = keep heading
+            int(lat * 1e7),     # param5: latitude scaled integer
+            int(lon * 1e7),     # param6: longitude scaled integer
+            alt                 # param7: altitude meters
+        )
+        print(f"[Drone] Going to lat={lat}, lon={lon}, alt={alt}m, yaw={yaw_deg}°")
+          
