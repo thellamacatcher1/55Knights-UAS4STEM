@@ -1,99 +1,95 @@
-from picamera2 import MappedArray, Picamera2, Preview
-from picamera2.devices import Hailo, hailo_architecture
-
-from uas_vision.utils import extract_detections, draw_detections
-import config
 import threading
+import time
 import cv2
 import numpy as np
+from picamera2 import Picamera2, Preview, MappedArray
+from picamera2.devices import Hailo, hailo_architecture
+
+import config
 
 class ObjectDetector:
-    def __init__(
-        self,
-        model=None,
-        labels=config.LABELS_PATH,
-        score_thresh=config.SCORE_THRESH,
-        video_w=config.VIDEO_W,
-        video_h=config.VIDEO_H,
-        frame_rate=config.FRAME_RATE,
-    ):
-        if model is None:
-            model = (
-                '/usr/share/hailo-models/yolov8m_h10.hef'
-                if hailo_architecture() == 'HAILO10H'
-                else '/usr/share/hailo-models/yolov8s_h8l.hef'
-            )
-
+    def __init__(self, model, labels, score_thresh=0.5):
         self.model = model
+        self.labels = labels
         self.score_thresh = score_thresh
-        self.video_w = video_w
-        self.video_h = video_h
-        self.frame_rate = frame_rate
-        self._lock = threading.Lock()
 
+        self.detections = []
+        self.offset_x = 0
+        self.offset_y = 0
+        self._detections_lock = threading.Lock()
 
-        with open(labels, 'r', encoding='utf-8') as f:
-            self.class_names = f.read().splitlines()
+        self._detector_thread = None
+        self._stop_event = threading.Event()
+        self.is_running = False
 
-        self._detections = []
-        self._offset = (0, 0)
-        self._hailo = None
-        self._picam2 = None
+        self.picam2 = Picamera2()
+        self.picam2.configure(self.picam2.create_preview_configuration(
+            main={"size": (config.VIDEO_W, config.VIDEO_H)},
+            lores={"size": (640, 480)},
+            display="lores"
+        ))
+        self.picam2.start()
 
-    def get_detections(self):
-        with self._lock:
-            return list(self._detections)
+        self.hailo = Hailo()
+        self.hailo.set_model(self.model)
+        self.hailo.set_labels(self.labels)
+        self.hailo.set_thresholds(self.score_thresh)
 
-    def get_offset(self):
-        with self._lock:
-            return self._offset
+        self.labels_list = self.hailo.get_labels()
 
     def start(self):
-        self._hailo = Hailo(self.model)
-        self._hailo.__enter__()
-        model_h, model_w, _ = self._hailo.get_input_shape()
-
-        self._picam2 = Picamera2()
-        main = {'size': (self.video_w, self.video_h), 'format': 'XRGB8888'}
-        lores = {'size': (model_w, model_h), 'format': 'RGB888'}
-        config_cam = self._picam2.create_preview_configuration(
-            main, lores=lores, controls={'FrameRate': self.frame_rate}
-        )
-        self._picam2.configure(config_cam)
-        self._picam2.start_preview(Preview.QTGL, x=0, y=0,
-                                   width=self.video_w, height=self.video_h)
-        self._picam2.start()
-        #cropping
-        #self._picam2.set_controls({"ScalerCrop": (184, 0, 1088, 1088)})  # ← add here
-        self._picam2.pre_callback = self._draw_callback
+        if not self.is_running:
+            self.is_running = True
+            self._stop_event.clear()
+            self._detector_thread = threading.Thread(target=self._detection_loop, daemon=True)
+            self._detector_thread.start()
+            print("Detection started")
 
     def stop(self):
-        if self._picam2:
-            self._picam2.stop()
-            self._picam2.stop_preview()
-            self._picam2 = None
-        if self._hailo:
-            self._hailo.__exit__(None, None, None)
-            self._hailo = None
+        if self.is_running:
+            self._stop_event.set()
+            self.is_running = False
+            if self._detector_thread:
+                self._detector_thread.join()
+            print("Detection stopped")
+
+    def _detection_loop(self):
+        try:
+            while not self._stop_event.is_set():
+                frame = self.picam2.capture_array()
+                detections = self.hailo.run_detection(frame)
+
+                with self._detections_lock:
+                    self.detections = detections
+
+                    if detections:
+                        best_detection = max(detections, key=lambda d: d[2])
+                        class_name, bbox, score = best_detection
+                        x0, y0, x1, y1 = bbox
+                        center_x = (x0 + x1) // 2
+                        center_y = (y0 + y1) // 2
+
+                        frame_center_x = config.VIDEO_W // 2
+                        frame_center_y = config.VIDEO_H // 2
+
+                        self.offset_x = center_x - frame_center_x
+                        self.offset_y = center_y - frame_center_y
+                    else:
+                        self.offset_x = 0
+                        self.offset_y = 0
+
+                time.sleep(0.05)
+
+        except Exception as e:
+            print(f"Error in detection loop: {e}")
+
+    def get_detections(self):
+        with self._detections_lock:
+            return self.detections.copy()
+
+    def get_offset(self):
+        with self._detections_lock:
+            return self.offset_x, self.offset_y
 
     def run_loop(self):
-        try:
-            while True:
-                frame = self._picam2.capture_array('lores')
-                results = self._hailo.run(frame)
-                with self._lock:
-                    self._detections = extract_detections(
-                        results, self.video_w, self.video_h,
-                        self.class_names, self.score_thresh
-                    )
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self.stop()
-            
-    def _draw_callback(self, request):
-        with MappedArray(request, "main") as m:
-            with self._lock:
-                self._offset = draw_detections(
-                    m.array, self._detections, self.video_w, self.video_h
-                )
+        self._detection_loop()

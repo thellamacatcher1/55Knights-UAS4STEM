@@ -1,0 +1,5 @@
+# Tracking-specific dependencies
+opencv-python>=4.5.0
+numpy>=1.19.0
+picamera2>=0.3.0
+PyMAVLink>=2.4.30
