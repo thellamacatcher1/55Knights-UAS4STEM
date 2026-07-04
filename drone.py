@@ -72,17 +72,27 @@ class Drone:
         self._conn.motors_disarmed_wait()
         print("[Drone] Disarmed")
 
-    def set_mode(self, mode: str):
+    def set_mode(self, mode: str, timeout: float = 5):
         mode_mapping = self._conn.mode_mapping()
         if mode not in mode_mapping:
             raise ValueError(f"[Drone] Unknown mode '{mode}'. Available: {list(mode_mapping.keys())}")
         mode_id = mode_mapping[mode]
+    
         self._conn.mav.set_mode_send(
             self._conn.target_system,
             mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
             mode_id
         )
-        print(f"[Drone] Mode set to {mode}")
+    
+        start = time.time()
+        while time.time() - start < timeout:
+            msg = self._conn.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+            if msg is None:
+                continue
+            if mavutil.mode_string_v10(msg) == mode:
+                print(f"[Drone] Mode confirmed: {mode}")
+                return
+        raise RuntimeError(f"[Drone] Mode change to '{mode}' not confirmed within {timeout}s")
         
     def get_mode(self):
         msg = self._conn.recv_match(type='HEARTBEAT', blocking=True, timeout=3)
