@@ -6,15 +6,26 @@
 #| `--lower_speed` | Lowering speed (pixels/sec) | 0.01                      |
 #| `--mavlink`     | MAVLink connection string   | config.MAVLINK_CONNECTION |
 #| `--baud`        | MAVLink baud rate           | config.MAVLINK_BAUD       |
-
+#| `--dry-run`     | No real MAVLink; print velocity commands only | False   |
 import argparse
 import threading
 import time
-
 import config
 from uas_vision import ObjectDetector
 from uas_mavlink import Drone
 from uas_mavlink.controller import TrackingController
+
+
+class DryRunDrone:
+    """Stands in for Drone during bench tests — no MAVLink connection at all.
+    Just prints what would have been sent, so you can watch vx/vy react to
+    a target moved by hand under the camera without any Pixhawk attached."""
+    def set_velo_body(self, vx, vy, vz):
+        print(f"[DryRun] set_velo_body -> vx={vx:.2f} vy={vy:.2f} vz={vz:.2f}")
+
+    def get_location(self):
+        return None  # forces altitude-hold branch off, since that's still commented out anyway
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Drone Vision + MAVLink")
@@ -26,7 +37,10 @@ def parse_args():
     parser.add_argument("--track", action="store_true", help="Enable tracking mode")
     parser.add_argument("--target", default="hammer", help="Target class to track")
     parser.add_argument("--lower_speed", type=float, default=0.01, help="Lowering speed (pixels per second)")
+    parser.add_argument("--dry-run", action="store_true",
+                         help="Skip MAVLink entirely, use a stub that prints velocity commands")
     return parser.parse_args()
+
 
 def main():
     args = parse_args()
@@ -38,9 +52,11 @@ def main():
     )
     detector.start()
 
-    # Initialize drone if needed
     drone = None
-    if args.mavlink:
+    if args.dry_run:
+        drone = DryRunDrone()
+        print("[Main] Dry-run mode: no MAVLink connection, printing commands only")
+    elif args.mavlink:
         try:
             drone = Drone(args.mavlink, args.baud)
             drone.connect()
@@ -54,18 +70,13 @@ def main():
     if args.track:
         print(f"Tracking mode enabled for target: {args.target}")
         try:
-            # Create tracking controller
             tracker = TrackingController(detector, drone, args.target, args.lower_speed)
             tracker.start_tracking()
-
-            # Run tracking for 30 seconds or until interrupted
             try:
                 time.sleep(30)
             except KeyboardInterrupt:
                 pass
-
             tracker.stop_tracking()
-
         except Exception as e:
             print(f"Tracking error: {e}")
     else:
@@ -76,10 +87,10 @@ def main():
                 time.sleep(0.1)
         except KeyboardInterrupt:
             print("down")
-
             if drone:
                 drone.disarm()
                 drone.disconnect()
+
 
 if __name__ == "__main__":
     main()
