@@ -16,7 +16,9 @@ class ObjectDetector:
         self.offset_x = 0
         self.offset_y = 0
         self.offsets_by_class = {}
+        self.status_text = ""
         self._detections_lock = threading.Lock()
+        self._status_lock = threading.Lock()
         self._detector_thread = None
         self._stop_event = threading.Event()
         self.is_running = False
@@ -41,10 +43,25 @@ class ObjectDetector:
         if not self.headless:
             self.picam2.pre_callback = self._draw_callback
 
+    def set_status_text(self, text):
+        """Called by TrackingController/test.py to show what the drone is
+        currently doing, drawn into the corner of the preview window.
+        Harmless no-op in headless mode — nothing ever reads it."""
+        with self._status_lock:
+            self.status_text = text
+
+    def get_status_text(self):
+        with self._status_lock:
+            return self.status_text
+
     def _draw_callback(self, request):
         with MappedArray(request, "main") as m:
             with self._detections_lock:
                 draw_detections(m.array, self.detections, config.VIDEO_W, config.VIDEO_H)
+            status = self.get_status_text()
+            if status:
+                cv2.putText(m.array, status, (10, config.VIDEO_H - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2, cv2.LINE_AA)
 
     def start(self):
         if not self.is_running:
@@ -69,7 +86,7 @@ class ObjectDetector:
         try:
             while not self._stop_event.is_set():
                 frame = self.picam2.capture_array('lores')
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # test: try the opposite channel order
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
                 hailo_output = self.hailo.run(frame)
                 detections = extract_detections(
@@ -115,4 +132,11 @@ class ObjectDetector:
 
     def get_offset(self):
         with self._detections_lock:
-            return
+            return self.offset_x, self.offset_y
+
+    def get_offsets(self):
+        with self._detections_lock:
+            return dict(self.offsets_by_class)
+
+    def run_loop(self):
+        self._detection_loop()

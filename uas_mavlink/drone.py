@@ -79,12 +79,15 @@ class Drone:
         )
         start = time.time()
         while time.time() - start < timeout:
-            msg = self._conn.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+            msg = self._conn.recv_match(type=['HEARTBEAT', 'STATUSTEXT'], blocking=True, timeout=1)
             if msg is None:
                 continue
-            if mavutil.mode_string_v10(msg) == mode:
-                print(f"[Drone] Mode confirmed: {mode}")
-                return
+            if msg.get_type() == 'STATUSTEXT':
+                print(f"[Drone] FC: {msg.text.strip()}")
+            if msg.get_type() == 'HEARTBEAT':
+                if mavutil.mode_string_v10(msg) == mode:
+                    print(f"[Drone] Mode confirmed: {mode}")
+                    return
         raise RuntimeError(f"[Drone] Mode change to '{mode}' not confirmed within {timeout}s")
 
     def get_mode(self):
@@ -99,8 +102,8 @@ class Drone:
             return {
                 "lat": msg.lat / 1e7,
                 "lon": msg.lon / 1e7,
-                "alt": msg.relative_alt / 1000.0,  # mm -> meters
-                "heading": msg.hdg / 100.0,  # centidegrees -> degrees
+                "alt": msg.relative_alt / 1000.0,
+                "heading": msg.hdg / 100.0,
             }
         return None
 
