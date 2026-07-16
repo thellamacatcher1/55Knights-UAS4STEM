@@ -6,9 +6,9 @@
 #| `--lower_speed` | Lowering speed (pixels/sec) | 0.01                      |
 #| `--mavlink`     | MAVLink connection string   | config.MAVLINK_CONNECTION |
 #| `--baud`        | MAVLink baud rate           | config.MAVLINK_BAUD       |
-#| `--dry-run`     | No real MAVLink; print velocity commands only | False   |
+#| `--dry-run`     | No MAVLink; print velocity commands only | False   |
+#| `--headless`    | Skip opening the preview window | False                |
 import argparse
-import threading
 import time
 import config
 from uas_vision import ObjectDetector
@@ -39,16 +39,18 @@ def parse_args():
     parser.add_argument("--lower_speed", type=float, default=0.01, help="Lowering speed (pixels per second)")
     parser.add_argument("--dry-run", action="store_true",
                          help="Skip MAVLink entirely, use a stub that prints velocity commands")
+    parser.add_argument("--headless", action="store_true",
+                         help="Skip opening the preview window")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-
     detector = ObjectDetector(
         model=args.model,
         labels=args.labels,
         score_thresh=args.score_thresh,
+        headless=args.headless,
     )
     detector.start()
 
@@ -63,9 +65,6 @@ def main():
             print("Drone connected")
         except Exception as e:
             print(f"Drone connection failed: {e}")
-
-    vision_thread = threading.Thread(target=detector.run_loop, daemon=True)
-    vision_thread.start()
 
     if args.track:
         print(f"Tracking mode enabled for target: {args.target}")
@@ -82,8 +81,12 @@ def main():
     else:
         try:
             while True:
-                dx, dy = detector.get_offset()
-                print(f"dx={dx:+d} dy={dy:+d}")
+                offsets = detector.get_offsets()
+                if offsets:
+                    line = "  ".join(f"{cls}: dx={dx:+d} dy={dy:+d}" for cls, (dx, dy) in offsets.items())
+                else:
+                    line = "no detections"
+                print(line)
                 time.sleep(0.1)
         except KeyboardInterrupt:
             print("down")

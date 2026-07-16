@@ -1,6 +1,6 @@
-MODEL_PATH = "models/qr8s.hef"
-LABELS_PATH = "models/QRLabels.txt"
-SCORE_THRESH = 0.5
+MODEL_PATH = "models/qrhammer8m.hef"
+LABELS_PATH = "models/qr_hammerLabels.txt"
+SCORE_THRESH = 0.06
 VIDEO_W = 1280
 VIDEO_H = 960
 FRAME_RATE = 30
