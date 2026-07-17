@@ -4,11 +4,18 @@ import config
 
 
 class TrackingController:
-    CENTER_DEADZONE = 50
+    CENTER_DEADZONE = 20  # pixels. shared with test.py so both sides agree on what "centered" means
 
-    MIN_SPEED = 0.0
-    MAX_SPEED = 1.0
-    KP = 0.006
+    MIN_SPEED = 0.0    # m/s floor, no minimum right now, small offsets get small commands
+    MAX_SPEED = 1.0     # m/s cap, kept low on purpose for early testing, way under the 4mph safety limit
+    KP = 0.006           # proportional gain, still a rough guess, tune this against real flight data
+
+    # once alt drops below this while centered, ready_for_final_land() starts
+    # returning true and test.py hands off to LAND mode for the actual touchdown.
+    # ardupilot's own LAND does a controlled descent better than anything we'd
+    # write by hand here, so this class just gets the drone low and steady,
+    # then gets out of the way
+    FINAL_LAND_ALT = 0.5  # meters
 
     def __init__(self, detector, drone=None, target_class="person", lower_speed=0.01):
         self.detector = detector
@@ -43,6 +50,26 @@ class TrackingController:
             if self._tracking_thread:
                 self._tracking_thread.join()
             print("track stopped")
+
+    def ready_for_final_land(self):
+        # true once we're both centered on target AND low enough that
+        # handing off to LAND mode for the last bit of descent makes sense.
+        # test.py polls this during the "descending" phase to decide when to
+        # stop commanding velocity ourselves and just let ardupilot land
+        if not self.drone:
+            return False
+        loc = self.drone.get_location()
+        if loc is None:
+            return False
+
+        offsets = self.detector.get_offsets()
+        offset = offsets.get(self.target_class)
+        if offset is None:
+            return False
+
+        dx, dy = offset
+        centered = abs(dx) <= self.CENTER_DEADZONE and abs(dy) <= self.CENTER_DEADZONE
+        return centered and loc["alt"] <= self.FINAL_LAND_ALT
 
     def _tracking_loop(self):
         last_time = time.time()
@@ -82,42 +109,39 @@ class TrackingController:
         if not self.drone:
             return
 
-        vx = 0.0  # forward(+)/backward(-)
-        vy = 0.0  # right(+)/left(-)
-        vz = 0.0  # down(+)/up(-) — not active yet, see Future Altitude Hold below
+        vx = 0.0  # forward positive, backward negative
+        vy = 0.0  # right positive, left negative
+        vz = 0.0  # down positive, up negative
 
         if target_visible:
-            # ---------- X Tracking (image left/right -> body right/left) ----------
+            # x tracking, image left/right maps to body right/left
             if abs(offset_x) > self.CENTER_DEADZONE:
                 raw = offset_x * self.KP
                 speed = max(self.MIN_SPEED, min(self.MAX_SPEED, abs(raw)))
                 vy = speed if raw > 0 else -speed
 
-            # ---------- Y Tracking ----------
-            # Bench-confirmed: sign flipped from the naive "dy positive = top =
-            # front" assumption — actual camera mount/pipeline needed this
-            # negation to match physical forward/backward correctly.
+            # y tracking. bench tested and confirmed with the sign flipped
+            # from the naive assumption. dy positive in our pipeline needs
+            # the negative sign here to actually move the drone forward
+            # toward the target, not away from it
             if abs(offset_y) > self.CENTER_DEADZONE:
                 raw = -offset_y * self.KP
                 speed = max(self.MIN_SPEED, min(self.MAX_SPEED, abs(raw)))
                 vx = speed if raw > 0 else -speed
 
-        # ---------- Future Altitude Hold ----------
-        #
-        # target_altitude = 1.0
-        # current_alt = self.drone.get_altitude()
-        #
-        # if current_alt is not None:
-        #     if current_alt > target_altitude + 0.1:
-        #         vz = 0.20
-        #     elif current_alt < target_altitude - 0.1:
-        #         vz = -0.20
+            # descend once we're centered and have a real altitude reading.
+            # proportional term capped at lower_speed so it eases off as we
+            # get close to target_alt instead of slamming straight down
+            centered = abs(offset_x) <= self.CENTER_DEADZONE and abs(offset_y) <= self.CENTER_DEADZONE
+            if centered and self.drone:
+                loc = self.drone.get_location()
+                if loc is not None:
+                    alt_error = loc["alt"] - self.target_alt
+                    if alt_error > 0.05:
+                        vz = min(self.lower_speed, 0.5 * alt_error)
 
         self.drone.set_velo_body(vx, vy, vz)
 
-        # _describe reads vx/vy AFTER they're finalized above, so the printed/
-        # drawn text always matches whatever was actually just commanded —
-        # no separate sync needed if a sign ever changes again later.
         plain = self._describe(vx, vy, vz, target_visible)
         print(f"Velocity cmd: vx={vx:.2f}, vy={vy:.2f}, vz={vz:.2f}  -> {plain}")
 
@@ -125,6 +149,10 @@ class TrackingController:
             self.detector.set_status_text(plain)
 
     def _describe(self, vx, vy, vz, target_visible=True):
+        # plain english version of the velocity command, gets written into
+        # the corner of the preview overlay by the detector, and printed to
+        # terminal. purely for reading the logs and eyeballing the window,
+        # doesn't affect any actual control logic
         if not target_visible:
             return "NO TARGET"
 

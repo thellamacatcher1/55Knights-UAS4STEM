@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-mission/test.py — detect -> GUIDED (centered via TrackingController) -> LAND.
+mission/test.py - detect, switch to guided, center + precision descend with
+TrackingController, then land.
 
-Start your AUTO mission yourself via RC/Mission Planner. This script only
-watches, headless or windowed, and takes over once the target is confirmed.
+start your AUTO mission yourself thru RC or Mission Planner. this script just
+watches (headless or windowed) and takes over once target is confirmed.
 
---dry-run: no MAVLink connection at all, a stub prints what would be
-commanded. Stays running past centered/lost until Ctrl+C — never lands.
+if target gets lost mid centering/descent (not landed yet) the script wont
+force a land in place anymore, it goes back to whatever mode was active
+before guided (usually AUTO) so the original mission can keep going.
 
---headless: skip the preview window/status overlay entirely.
+--dry-run: no mavlink connection at all, stub just prints what would be sent.
+keeps running til ctrl+c, never actually reaches LAND.
 
-Note: the periodic "is the pilot still letting us fly" check is commented
-out below — ArduPilot itself stops honoring set_velo_body()/set_mode() the
-instant RC override takes the vehicle out of GUIDED, regardless of whether
-this script notices. That check was only ever for graceful logging/exit,
-not the actual safety mechanism.
+--headless: skip the preview window and overlay entirely.
 """
 
 import argparse
@@ -39,7 +38,7 @@ class DryRunDrone:
         self._mode = "AUTO"
 
     def connect(self):
-        log("[DryRun] connect() — no real connection made")
+        log("[DryRun] connect() - not really connecting to anything")
 
     def disconnect(self):
         log("[DryRun] disconnect()")
@@ -48,19 +47,25 @@ class DryRunDrone:
         return self._mode
 
     def set_mode(self, mode, timeout=5):
-        log(f"[DryRun] set_mode({mode}) — would command this, no real FC involved")
+        log(f"[DryRun] set_mode({mode}) - would send this, no real fc")
         self._mode = mode
 
     def get_location(self):
         return {"lat": 0.0, "lon": 0.0, "alt": 2.0, "heading": 0.0}
+
+    def get_velocity(self):
+        return {"vx": 0.0, "vy": 0.0, "vz": 0.0}
+
+    def brake_and_wait(self, threshold=0.3, timeout=10):
+        log("[DryRun] brake_and_wait() - no real fc, pretending we already stopped")
+        return True
 
     def set_velo_body(self, vx, vy, vz):
         pass
 
 
 def try_set_mode(drone, mode, retries=3, delay=1.0):
-    """Retries a mode change instead of letting a single failure crash the
-    whole script. Returns True/False rather than raising."""
+    # retries a mode change a few times instead of just crashing the whole script
     for attempt in range(1, retries + 1):
         try:
             drone.set_mode(mode)
@@ -69,35 +74,35 @@ def try_set_mode(drone, mode, retries=3, delay=1.0):
             log(f"set_mode('{mode}') attempt {attempt}/{retries} failed: {e}")
             if attempt < retries:
                 time.sleep(delay)
-    log(f"set_mode('{mode}') failed after {retries} attempts — giving up on this transition")
+    log(f"set_mode('{mode}') failed after {retries} tries, giving up on this one")
     return False
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Detect -> GUIDED -> center -> LAND")
+    parser = argparse.ArgumentParser(description="Detect -> GUIDED -> center -> precision descend -> LAND")
     parser.add_argument("-m", "--model", default=config.MODEL_PATH)
     parser.add_argument("-l", "--labels", default=config.LABELS_PATH)
     parser.add_argument("-s", "--score_thresh", type=float, default=config.SCORE_THRESH)
     parser.add_argument("--mavlink", default=config.MAVLINK_CONNECTION)
     parser.add_argument("--baud", type=int, default=config.MAVLINK_BAUD)
-    parser.add_argument("--target", required=True, help="Class name to trigger on")
+    parser.add_argument("--target", required=True, help="class name to trigger on")
     parser.add_argument("--confirm-frames", type=int, default=5,
-                         help="Consecutive detections required before engaging GUIDED")
+                         help="how many frames in a row before we switch to guided")
     parser.add_argument("--centered-frames", type=int, default=15,
-                         help="Consecutive well-centered frames required before switching to LAND")
+                         help="how many frames in a row centered before we start descending")
     parser.add_argument("--lost-timeout", type=float, default=2.0,
-                         help="Seconds without a detection (while centering) before landing in place")
+                         help="seconds with no detection before going back to old flight mode")
     parser.add_argument("--search-timeout", type=float, default=120,
-                         help="Max seconds to wait for initial detection before giving up")
+                         help="max seconds to wait for first detection before giving up")
     parser.add_argument("--dry-run", action="store_true",
-                         help="No MAVLink at all — print what would be commanded, stays running until Ctrl+C")
+                         help="no mavlink at all, just print what would be sent, runs til ctrl+c")
     parser.add_argument("--headless", action="store_true",
-                         help="No preview window/status overlay. Default shows the window.")
+                         help="no preview window/overlay. default is window shown")
     return parser.parse_args()
 
 
 def wait_for_target(detector, drone, args):
-    log(f"SEARCHING — watching for '{args.target}'. Start your AUTO mission now.")
+    log(f"SEARCHING - watching for '{args.target}'. go ahead and start your AUTO mission now.")
     detector.set_status_text("SEARCHING")
     consecutive_hits = 0
     start_time = time.time()
@@ -105,7 +110,7 @@ def wait_for_target(detector, drone, args):
 
     while True:
         if time.time() - start_time > args.search_timeout:
-            log("SEARCHING — timeout, no detection. AUTO mission left untouched. Exiting.")
+            log("SEARCHING - timed out, never saw it. AUTO mission left alone. exiting.")
             return False
 
         detections = detector.get_detections()
@@ -114,53 +119,43 @@ def wait_for_target(detector, drone, args):
 
         if time.time() - last_status > 0.5:
             mode = drone.get_mode()
-            log(f"SEARCHING — target_seen={hit} streak={consecutive_hits}/{args.confirm_frames} "
+            log(f"SEARCHING - target_seen={hit} streak={consecutive_hits}/{args.confirm_frames} "
                 f"fc_mode={mode}")
             last_status = time.time()
 
         if consecutive_hits >= args.confirm_frames:
-            log(f"SEARCHING — '{args.target}' confirmed over {args.confirm_frames} frames.")
+            log(f"SEARCHING - '{args.target}' confirmed over {args.confirm_frames} frames.")
             return True
 
         time.sleep(0.05)
 
 
 def center_and_land(detector, drone, args):
-    log("ENGAGING — switching to GUIDED")
+    previous_mode = drone.get_mode()
+    log(f"ENGAGING - previous flight mode was '{previous_mode}', we'll go back to this if target is lost")
+
+    log("ENGAGING - braking to a stop before we start centering")
+    drone.brake_and_wait(threshold=0.3, timeout=10)
+
+    log("ENGAGING - switching to GUIDED")
     if not try_set_mode(drone, "GUIDED"):
-        log("ENGAGING — could not enter GUIDED. Aborting, leaving AUTO mission untouched.")
+        log("ENGAGING - couldn't get into GUIDED. bailing, AUTO mission untouched.")
         return
-    log(f"ENGAGING — fc_mode={drone.get_mode()}")
+    log(f"ENGAGING - fc_mode={drone.get_mode()}")
 
     tracker = TrackingController(detector, drone, target_class=args.target)
     tracker.start_tracking()
-    log("CENTERING — TrackingController started")
+    log("CENTERING - TrackingController started")
 
     deadzone = TrackingController.CENTER_DEADZONE
     stable_count = 0
     lost_since = None
     last_status = 0.0
-    already_announced_centered = False
+    phase = "centering"
     outcome = None
-
-    # last_mode_check = 0.0  # only needed if the RC-override abort check below is re-enabled
 
     try:
         while True:
-            # ---- RC override check — commented out, see module docstring ----
-            # ArduPilot itself stops honoring set_velo_body()/set_mode() the
-            # instant the pilot takes manual control; this was only for
-            # graceful script-side logging/exit, not the actual safety net.
-            #
-            # if time.time() - last_mode_check > 0.5:
-            #     current_mode = drone.get_mode()
-            #     last_mode_check = time.time()
-            #     if current_mode != "GUIDED":
-            #         log(f"CENTERING — ABORT: fc_mode={current_mode}, not GUIDED. "
-            #             f"Pilot has taken manual control. Backing off, not resuming automatically.")
-            #         outcome = "abort"
-            #         break
-
             offsets = detector.get_offsets()
             offset = offsets.get(args.target)
             loc = drone.get_location()
@@ -171,33 +166,37 @@ def center_and_land(detector, drone, args):
                     lost_since = time.time()
                 lost_for = time.time() - lost_since
                 stable_count = 0
-                status = f"CENTERING — target LOST for {lost_for:.1f}s alt={alt}"
+                status = f"{phase.upper()} - target LOST for {lost_for:.1f}s alt={alt}"
                 if lost_for > args.lost_timeout:
                     if args.dry_run:
                         if lost_for - args.lost_timeout < 0.35:
-                            log("CENTERING — target lost past timeout (dry-run: continuing to watch, Ctrl+C to stop)")
+                            log(f"{phase.upper()} - lost past timeout (dry run, keeps going, ctrl+c to stop)")
                     else:
-                        log(f"CENTERING — target lost >{args.lost_timeout}s. Aborting to LAND in place.")
+                        log(f"{phase.upper()} - lost for over {args.lost_timeout}s. "
+                            f"going back to '{previous_mode}'.")
                         outcome = "lost"
                         break
             else:
                 lost_since = None
                 dx, dy = offset
                 centered = abs(dx) <= deadzone and abs(dy) <= deadzone
-                if centered:
-                    stable_count += 1
-                else:
-                    stable_count = 0
-                status = (f"CENTERING — dx={dx:+d} dy={dy:+d} centered={centered} "
-                          f"stable={stable_count}/{args.centered_frames} alt={alt}")
-                if stable_count >= args.centered_frames:
-                    if args.dry_run:
-                        if not already_announced_centered:
-                            log("CENTERING — stably centered (dry-run: continuing to watch, Ctrl+C to stop)")
-                            already_announced_centered = True
+
+                if phase == "centering":
+                    if centered:
+                        stable_count += 1
                     else:
-                        log(f"CENTERING — stably centered for {args.centered_frames} frames.")
-                        outcome = "centered"
+                        stable_count = 0
+                    status = (f"CENTERING - dx={dx:+d} dy={dy:+d} centered={centered} "
+                              f"stable={stable_count}/{args.centered_frames} alt={alt}")
+                    if stable_count >= args.centered_frames:
+                        log(f"CENTERING - centered for {args.centered_frames} frames straight. starting descent.")
+                        phase = "descending"
+
+                elif phase == "descending":
+                    status = f"DESCENDING - dx={dx:+d} dy={dy:+d} centered={centered} alt={alt}"
+                    if not args.dry_run and tracker.ready_for_final_land():
+                        log(f"DESCENDING - alt={alt}, low enough now. handing off to LAND.")
+                        outcome = "descended"
                         break
 
             if time.time() - last_status > 0.3:
@@ -208,34 +207,43 @@ def center_and_land(detector, drone, args):
 
     finally:
         tracker.stop_tracking()
-        log("CENTERING — TrackingController stopped")
+        log("CENTERING - TrackingController stopped")
 
-    if outcome == "abort":
+    if outcome == "lost":
+        drone.set_velo_body(0, 0, 0)
+        log(f"REVERTING - velocity zeroed, switching back to '{previous_mode}'")
+        if not try_set_mode(drone, previous_mode):
+            log(f"REVERTING - couldn't confirm '{previous_mode}'. velocity is zeroed at least, "
+                f"check rc/gcs manually.")
+        else:
+            log(f"REVERTING - fc_mode={drone.get_mode()}")
+        return
+
+    if outcome != "descended":
         return
 
     drone.set_velo_body(0, 0, 0)
-    log("LANDING — velocity zeroed, switching to LAND")
+    log("LANDING - velocity zeroed, switching to LAND")
     detector.set_status_text("LANDING")
     if not try_set_mode(drone, "LAND"):
-        log("LANDING — could not confirm LAND mode. Drone velocity is zeroed; "
-            "check RC/GCS manually.")
+        log("LANDING - couldn't confirm LAND mode. velocity is zeroed, check rc/gcs manually.")
         return
-    log(f"LANDING — fc_mode={drone.get_mode()}")
+    log(f"LANDING - fc_mode={drone.get_mode()}")
 
     if args.dry_run:
-        log("LANDING — dry-run, no real descent to monitor. Done.")
+        log("LANDING - dry run, nothing real to monitor. done.")
         return
 
-    log("LANDING — monitoring descent")
+    log("LANDING - watching for touchdown")
     last_status = 0.0
     while True:
         loc = drone.get_location()
         alt = loc["alt"] if loc else None
         if time.time() - last_status > 0.5:
-            log(f"LANDING — alt={alt}")
+            log(f"LANDING - alt={alt}")
             last_status = time.time()
         if alt is not None and alt <= 0.15:
-            log("LANDING — near ground, assuming touchdown")
+            log("LANDING - close to ground, assuming touchdown")
             break
         time.sleep(0.2)
 
@@ -243,7 +251,7 @@ def center_and_land(detector, drone, args):
 def main():
     args = parse_args()
 
-    log("INIT — starting detector")
+    log("INIT - starting detector")
     detector = ObjectDetector(
         model=args.model,
         labels=args.labels,
@@ -253,39 +261,39 @@ def main():
     detector.start()
 
     if args.dry_run:
-        log("INIT — DRY RUN: no MAVLink connection, using stub")
+        log("INIT - dry run, no mavlink, using stub drone")
         drone = DryRunDrone()
         drone.connect()
     else:
-        log(f"INIT — connecting to drone on {args.mavlink}")
+        log(f"INIT - connecting to drone on {args.mavlink}")
         drone = Drone(args.mavlink, args.baud)
         drone.connect()
-    log(f"INIT — connected, fc_mode={drone.get_mode()}")
+    log(f"INIT - connected, fc_mode={drone.get_mode()}")
 
     try:
         found = wait_for_target(detector, drone, args)
         if found:
             center_and_land(detector, drone, args)
     except KeyboardInterrupt:
-        log("INTERRUPTED — attempting to land in place")
+        log("INTERRUPTED - trying to land in place")
         try:
             drone.set_velo_body(0, 0, 0)
             try_set_mode(drone, "LAND")
         except Exception as e:
-            log(f"INTERRUPTED — failed to switch to LAND: {e}")
+            log(f"INTERRUPTED - failed to switch to LAND: {e}")
     except Exception as e:
         log(f"UNEXPECTED ERROR: {e}")
-        log("Attempting to land in place before exiting")
+        log("trying to land in place before exiting")
         try:
             drone.set_velo_body(0, 0, 0)
             try_set_mode(drone, "LAND")
         except Exception as land_err:
-            log(f"Failed to land: {land_err}")
+            log(f"failed to land: {land_err}")
     finally:
-        log("SHUTDOWN — stopping detector, disconnecting drone")
+        log("SHUTDOWN - stopping detector, disconnecting drone")
         detector.stop()
         drone.disconnect()
-        log("SHUTDOWN — done")
+        log("SHUTDOWN - done")
 
 
 if __name__ == "__main__":
